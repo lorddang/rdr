@@ -70,6 +70,7 @@ func show(c *cli.Context) {
 		counters.Set(filename, counter)
 		instances = append(instances, filename)
 		fmt.Fprintf(c.App.Writer, "parse %v  done\n", file)
+		//counter.persist(filename)
 	}
 
 	// init html template
@@ -92,6 +93,15 @@ func show(c *cli.Context) {
 	if listenErr != nil {
 		fmt.Fprintf(c.App.ErrWriter, "Listen port err: %v\n", listenErr)
 	}
+}
+
+func server(c *cli.Context) {
+	go consumerTask()
+	http.HandleFunc("/parse", parse)
+	http.ListenAndServe(":"+c.String("port"), nil)
+
+	//cli.ShowCommandHelp(c, "daemon")
+
 }
 
 // keys is function for command `keys`
@@ -119,7 +129,7 @@ func main() {
 	app.Writer = os.Stdout
 	app.ErrWriter = os.Stderr
 	app.Commands = []cli.Command{
-		cli.Command{
+		{
 			Name:      "show",
 			Usage:     "show statistical information of rdbfile by webpage",
 			ArgsUsage: "FILE1 [FILE2] [FILE3]...",
@@ -132,11 +142,28 @@ func main() {
 			},
 			Action: show,
 		},
-		cli.Command{
+		{
 			Name:      "keys",
 			Usage:     "get all keys from rdbfile",
 			ArgsUsage: "FILE1 [FILE2] [FILE3]...",
 			Action:    keys,
+		},
+		{
+			Name:  "daemon",
+			Usage: "run as service",
+			Flags: []cli.Flag{
+				cli.StringFlag{
+					Name:  "config, c",
+					Value: "/etc/rdr.cnf",
+					Usage: "rdr server config file",
+				},
+				cli.UintFlag{
+					Name:  "port, p",
+					Value: 3379,
+					Usage: "Port for rdr service to listen",
+				},
+			},
+			Action: server,
 		},
 	}
 	app.CommandNotFound = func(c *cli.Context, command string) {

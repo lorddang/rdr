@@ -16,6 +16,10 @@ package main
 
 import (
 	"container/heap"
+	"encoding/json"
+	"fmt"
+	"github.com/dustin/go-humanize"
+	"github.com/garyburd/redigo/redis"
 	"sort"
 	"strconv"
 	"strings"
@@ -41,7 +45,7 @@ func NewCounter() *Counter {
 		keyPrefixNum:       map[typeKey]uint64{},
 		typeBytes:          map[string]uint64{},
 		typeNum:            map[string]uint64{},
-		separators:         ":;,_- ",
+		separators:         ":;,_-& ",
 	}
 }
 
@@ -207,6 +211,134 @@ func (c *Counter) calcuLargestKeyPrefix(num int) {
 	}
 }
 
+func (c *Counter) persist(instance string) {
+	c.persistLargestEntries(instance)
+	c.persistLargestKeyPrefixesByType(instance)
+	c.persistTypeBytesAndTypeNum(instance)
+	c.persistTotalBytesAndNum(instance)
+	c.persistLenLevelCount(instance)
+}
+
+func (c *Counter) persistLargestEntries(instance string) {
+	rds, err := redis.Dial("tcp", "localhost:6328")
+	if err != nil {
+		fmt.Println("error when connect with redis")
+	}
+	defer rds.Close()
+	item := map[string]interface{}{}
+	for _, e := range c.GetLargestEntries(100) {
+		item["key"] = e.Key
+		item["type"] = e.Type
+		item["bytes"] = e.Bytes
+		item["human_size"] = humanize.Bytes(e.Bytes)
+		item["num_of_elem"] = e.NumOfElem
+		item["len_of_largest_elem"] = e.LenOfLargestElem
+		item["field_of_largest_elem"] = e.FieldOfLargestElem
+		stringBytes, _ := json.Marshal(item)
+		rdsKeyName := fmt.Sprintf("%s:LargestEntries", instance)
+		rds.Do("rpush", rdsKeyName, string(stringBytes))
+	}
+
+}
+
+func (c *Counter) persistLargestKeyPrefixesByType(instance string) {
+	rds, err := redis.Dial("tcp", "localhost:6328")
+	if err != nil {
+		fmt.Println("error when connect with redis")
+	}
+	defer rds.Close()
+	largestKeyPrefixesByType := map[string][]*PrefixEntry{}
+	types := map[string]bool{}
+	item := map[string]interface{}{}
+	for _, entry := range c.GetLargestKeyPrefixes() {
+		// mem use less than 1M, and list is long enough, not necessary to add
+		if entry.Bytes < 1000*1000 && len(largestKeyPrefixesByType[entry.Type]) > 50 {
+			continue
+		}
+		item["key"] = entry.Key
+		item["bytes"] = entry.Bytes
+		item["human_size"] = humanize.Bytes(entry.Bytes)
+		item["numOfKey"] = entry.Num
+		stringBytes, _ := json.Marshal(item)
+		types[entry.Type] = true
+		rdsKeyName := fmt.Sprintf("%s:LargestkeyPrefixesByType:%s", instance, entry.Type)
+		rds.Do("hset", rdsKeyName, entry.Type, string(stringBytes))
+	}
+	for t := range types {
+		rdsKeyName := fmt.Sprintf("%s:LargestkeyPrefixesAllTypes", instance)
+		rds.Do("SADD", rdsKeyName, t)
+	}
+}
+
+func (c *Counter) persistTypeBytesAndTypeNum(instance string) {
+	rds, err := redis.Dial("tcp", "localhost:6328")
+	if err != nil {
+		fmt.Println("error when connect with redis")
+	}
+	defer rds.Close()
+	var data = make(map[string]map[string]interface{})
+	for k := range c.typeBytes {
+		if data[k] == nil {
+			data[k] = make(map[string]interface{})
+		}
+		data[k]["num"] = c.typeNum[k]
+		data[k]["bytes"] = c.typeBytes[k]
+		data[k]["human_size"] = humanize.Bytes(c.typeBytes[k])
+	}
+	stringBytes, _ := json.Marshal(data)
+	rdsKeyName := fmt.Sprintf("%s:TypeAndBytes", instance)
+	rds.Do("set", rdsKeyName, string(stringBytes))
+
+}
+
+func (c *Counter) persistTotalBytesAndNum(instance string) {
+	rds, err := redis.Dial("tcp", "localhost:6328")
+	if err != nil {
+		fmt.Println("error when connect with redis")
+	}
+	defer rds.Close()
+	totleNum := uint64(0)
+	for _, v := range c.typeNum {
+		totleNum += v
+	}
+	totleBytes := uint64(0)
+	for _, v := range c.typeBytes {
+		totleBytes += v
+	}
+	data := map[string]uint64{}
+	data["totleNum"] = totleNum
+	data["totleBytes"] = totleBytes
+	stringBytes, _ := json.Marshal(data)
+	rdsKeyName := fmt.Sprintf("%s:TotalBytesAndNum", instance)
+	rds.Do("set", rdsKeyName, string(stringBytes))
+}
+
+func (c *Counter) persistLenLevelCount(instance string) {
+	rds, err := redis.Dial("tcp", "localhost:6328")
+	if err != nil {
+		fmt.Println("error when connect with redis")
+	}
+	defer rds.Close()
+	data := make(map[string]map[string]map[string]interface{})
+	for _, e := range c.GetLenLevelCount() {
+		if data[e.typeKey.Type] == nil {
+			data[e.typeKey.Type] = make(map[string]map[string]interface{})
+			if data[e.typeKey.Type][e.typeKey.Key] == nil {
+				data[e.typeKey.Type][e.typeKey.Key] = make(map[string]interface{})
+
+			}
+		}
+		subMap := make(map[string]interface{})
+		subMap["num"] = e.Num
+		subMap["bytes"] = e.Bytes
+		subMap["human_size"] = humanize.Bytes(e.Num)
+		data[e.typeKey.Type][e.typeKey.Key] = subMap
+	}
+	stringBytes, _ := json.Marshal(data)
+	rdsKeyName := fmt.Sprintf("%s:LenLevelCount", instance)
+	rds.Do("set", rdsKeyName, string(stringBytes))
+}
+
 type entryHeap []*Entry
 
 func (h entryHeap) Len() int {
@@ -232,17 +364,17 @@ func (h *entryHeap) Push(e interface{}) {
 }
 
 type typeKey struct {
-	Type string
-	Key  string
+	Type string `json:"type"`
+	Key  string `json:"key"`
 }
 
 type prefixHeap []*PrefixEntry
 
 // PrefixEntry record value by prefix
 type PrefixEntry struct {
-	typeKey
-	Bytes uint64
-	Num   uint64
+	typeKey `json:"type_key"`
+	Bytes   uint64 `json:"bytes"`
+	Num     uint64 `json:"num"`
 }
 
 func (h prefixHeap) Len() int {

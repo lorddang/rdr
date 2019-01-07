@@ -19,12 +19,12 @@ import "strconv"
 
 // Entry is info of a redis recored
 type Entry struct {
-	Key                string
-	Bytes              uint64
-	Type               string
-	NumOfElem          uint64
-	LenOfLargestElem   uint64
-	FieldOfLargestElem string
+	Key                string `json:"key"`
+	Bytes              uint64 `json:"bytes"`
+	Type               string `json:"type"`
+	NumOfElem          uint64 `json:"num_of_elem"`
+	LenOfLargestElem   uint64 `json:"len_of_largest_elem"`
+	FieldOfLargestElem string `json:"field_of_largest_elem"`
 }
 
 // Decoder decode rdb file
